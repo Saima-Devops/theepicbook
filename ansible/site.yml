@@ -13,6 +13,10 @@
         name: epicbook
         state: started
 
+    - name: Verify EpicBook backend
+      ansible.builtin.include_role:
+        name: verification
+
 
 - name: Configure EpicBook frontend
   hosts: frontend
@@ -20,3 +24,8 @@
   roles:
     - common
     - frontend
+
+  tasks:
+    - name: Verify EpicBook frontend
+      ansible.builtin.include_role:
+        name: verification

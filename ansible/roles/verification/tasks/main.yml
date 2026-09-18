@@ -1,0 +1,43 @@
+---
+- name: Verify EpicBook backend service is active
+  ansible.builtin.command: systemctl is-active epicbook
+  register: epicbook_service_status
+  changed_when: false
+  failed_when: epicbook_service_status.stdout.strip() != "active"
+  when: "'backend' in group_names"
+
+- name: Verify EpicBook backend service is enabled
+  ansible.builtin.command: systemctl is-enabled epicbook
+  register: epicbook_service_enabled
+  changed_when: false
+  failed_when: epicbook_service_enabled.stdout.strip() != "enabled"
+  when: "'backend' in group_names"
+
+- name: Verify EpicBook backend is listening on port 8080
+  ansible.builtin.shell: ss -lnt | grep -q ':8080'
+  changed_when: false
+  when: "'backend' in group_names"
+
+- name: Verify EpicBook backend HTTP response
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ backend_app_port }}"
+    status_code: 200
+  when: "'backend' in group_names"
+
+- name: Verify Nginx service is active
+  ansible.builtin.command: systemctl is-active nginx
+  register: nginx_service_status
+  changed_when: false
+  failed_when: nginx_service_status.stdout.strip() != "active"
+  when: "'frontend' in group_names"
+
+- name: Verify Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  when: "'frontend' in group_names"
+
+- name: Verify frontend HTTP response
+  ansible.builtin.uri:
+    url: "http://127.0.0.1"
+    status_code: 200
+  when: "'frontend' in group_names"
