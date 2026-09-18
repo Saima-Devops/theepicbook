@@ -7,14 +7,7 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  azureServiceConnection: "Azure subscription 1"
-  terraformWorkingDirectory: "terraform"
-
-  # Remote Terraform state
-  terraformStateResourceGroup: "azure-devops"
-  terraformStateStorageAccount: "epicbooktfstate6992"
-  terraformStateContainer: "tfstate"
-  terraformStateKey: "epicbook.tfstate"
+  - group: Epicbook-mysql-secrets
 
 stages:
 
@@ -22,282 +15,252 @@ stages:
 # Stage 1: Validate
 # ============================================================
 - stage: Validate
-  displayName: "Validate Terraform"
+  displayName: "Validate Ansible Configuration"
 
   jobs:
-    - job: ValidateTerraform
-      displayName: "Terraform Format, Init and Validate"
+    - job: ValidateAnsible
+      displayName: "Validate Ansible"
 
       steps:
 
         - checkout: self
 
         # ----------------------------------------------------
-        # Install Terraform
-        # ----------------------------------------------------
-        - task: TerraformInstaller@1
-          displayName: "Install Terraform"
-          inputs:
-            terraformVersion: "latest"
-
-        # ----------------------------------------------------
-        # Terraform Format Check
+        # Install Ansible and required collections
         # ----------------------------------------------------
         - bash: |
             set -euo pipefail
 
-            cd "$(terraformWorkingDirectory)"
+            echo "Creating Ansible virtual environment..."
 
-            echo "Checking Terraform formatting..."
+            python3 -m venv "$(Agent.TempDirectory)/ansible-venv"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
 
-            terraform fmt -check -recursive
+            python -m pip install --upgrade pip
+            python -m pip install ansible
 
-            echo "Terraform formatting validation successful."
-          displayName: "Terraform Format Check"
+            echo "Ansible version:"
+            ansible --version
 
-        # ----------------------------------------------------
-        # Terraform Init
-        # ----------------------------------------------------
-        - task: AzureCLI@2
-          displayName: "Terraform Init"
-          inputs:
-            azureSubscription: "$(azureServiceConnection)"
-            scriptType: bash
-            scriptLocation: inlineScript
-            inlineScript: |
-              set -euo pipefail
+            echo "Installing required Ansible collections..."
 
-              cd "$(terraformWorkingDirectory)"
+            ansible-galaxy collection install \
+              -r ansible/collections/requirements.yml
 
-              echo "Initializing Terraform with Azure remote state..."
-
-              terraform init \
-                -backend-config="resource_group_name=$(terraformStateResourceGroup)" \
-                -backend-config="storage_account_name=$(terraformStateStorageAccount)" \
-                -backend-config="container_name=$(terraformStateContainer)" \
-                -backend-config="key=$(terraformStateKey)" \
-                -backend-config="use_azuread_auth=true"
-
-              echo "Terraform initialization successful."
+            echo "Installed collections:"
+            ansible-galaxy collection list
+          displayName: "Install Ansible and Collections"
 
         # ----------------------------------------------------
-        # Terraform Validate
+        # Validate inventory
         # ----------------------------------------------------
         - bash: |
             set -euo pipefail
 
-            cd "$(terraformWorkingDirectory)"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
 
-            echo "Validating Terraform configuration..."
+            echo "Validating Ansible inventory..."
 
-            terraform validate
+            ansible-inventory \
+              -i ansible/inventory.ini \
+              --graph
 
-            echo "Terraform validation successful."
-          displayName: "Terraform Validate"
+            ansible-inventory \
+              -i ansible/inventory.ini \
+              --list > /dev/null
+
+            echo "Inventory validation successful."
+          displayName: "Validate Inventory"
+
+        # ----------------------------------------------------
+        # Validate playbook syntax
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            echo "Running Ansible syntax check..."
+
+            ansible-playbook \
+              -i ansible/inventory.ini \
+              ansible/site.yml \
+              --syntax-check
+
+            echo "Ansible syntax validation successful."
+          displayName: "Validate Playbook"
 
 
 # ============================================================
-# Stage 2: Plan
+# Stage 2: Deploy
 # ============================================================
-- stage: Plan
-  displayName: "Terraform Plan"
+- stage: Deploy
+  displayName: "Deploy EpicBook"
 
   dependsOn: Validate
   condition: succeeded()
 
   jobs:
-    - job: TerraformPlan
-      displayName: "Create Terraform Plan"
+    - job: DeployEpicBook
+      displayName: "Deploy EpicBook with Ansible"
 
       steps:
 
         - checkout: self
 
         # ----------------------------------------------------
-        # Install Terraform
+        # Install Ansible
         # ----------------------------------------------------
-        - task: TerraformInstaller@1
-          displayName: "Install Terraform"
+        - bash: |
+            set -euo pipefail
+
+            python3 -m venv "$(Agent.TempDirectory)/ansible-venv"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            python -m pip install --upgrade pip
+            python -m pip install ansible
+
+            ansible-galaxy collection install \
+              -r ansible/collections/requirements.yml
+
+            echo "Ansible installation successful."
+            ansible --version
+          displayName: "Install Ansible"
+
+        # ----------------------------------------------------
+        # Download SSH private key from Azure DevOps
+        # Secure File: azure-ansible
+        # ----------------------------------------------------
+        - task: DownloadSecureFile@1
+          name: sshKey
+          displayName: "Download SSH Private Key"
           inputs:
-            terraformVersion: "latest"
+            secureFile: azure-ansible
 
         # ----------------------------------------------------
-        # Terraform Init
+        # Prepare SSH
         # ----------------------------------------------------
-        - task: AzureCLI@2
-          displayName: "Terraform Init"
-          inputs:
-            azureSubscription: "$(azureServiceConnection)"
-            scriptType: bash
-            scriptLocation: inlineScript
-            inlineScript: |
-              set -euo pipefail
+        - bash: |
+            set -euo pipefail
 
-              cd "$(terraformWorkingDirectory)"
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
 
-              terraform init \
-                -backend-config="resource_group_name=$(terraformStateResourceGroup)" \
-                -backend-config="storage_account_name=$(terraformStateStorageAccount)" \
-                -backend-config="container_name=$(terraformStateContainer)" \
-                -backend-config="key=$(terraformStateKey)" \
-                -backend-config="use_azuread_auth=true"
+            chmod 600 "$(sshKey.secureFilePath)"
+
+            touch ~/.ssh/known_hosts
+            chmod 600 ~/.ssh/known_hosts
+
+            echo "SSH key prepared securely."
+          displayName: "Prepare SSH"
 
         # ----------------------------------------------------
-        # Terraform Plan
+        # Register VM host keys
         # ----------------------------------------------------
-        - task: AzureCLI@2
-          displayName: "Terraform Plan"
-          inputs:
-            azureSubscription: "$(azureServiceConnection)"
-            scriptType: bash
-            scriptLocation: inlineScript
-            inlineScript: |
-              set -euo pipefail
+        - bash: |
+            set -euo pipefail
 
-              cd "$(terraformWorkingDirectory)"
+            HOSTS=$(awk '
+              /ansible_host=/ {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /^ansible_host=/) {
+                    split($i, a, "=")
+                    print a[2]
+                  }
+                }
+              }
+            ' ansible/inventory.ini | sort -u)
 
-              echo "Creating reviewed Terraform plan..."
+            for HOST in $HOSTS; do
+              echo "Adding host key for $HOST"
+              ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+            done
 
-              terraform plan \
-                -out="$(Build.ArtifactStagingDirectory)/tfplan"
-
-              echo "Terraform plan created successfully."
-
-              terraform show \
-                -no-color \
-                "$(Build.ArtifactStagingDirectory)/tfplan" \
-                > "$(Build.ArtifactStagingDirectory)/tfplan-summary.txt"
-
-        # ----------------------------------------------------
-        # Publish Plan Artifact
-        # ----------------------------------------------------
-        - task: PublishPipelineArtifact@1
-          displayName: "Publish Terraform Plan"
-          inputs:
-            targetPath: "$(Build.ArtifactStagingDirectory)/tfplan"
-            artifact: "terraform-plan"
-
-        - task: PublishPipelineArtifact@1
-          displayName: "Publish Terraform Plan Summary"
-          inputs:
-            targetPath: "$(Build.ArtifactStagingDirectory)/tfplan-summary.txt"
-            artifact: "terraform-plan-summary"
-
-
-# ============================================================
-# Stage 3: Manual Approval
-# ============================================================
-- stage: Approval
-  displayName: "Approve Terraform Apply"
-
-  dependsOn: Plan
-  condition: succeeded()
-
-  jobs:
-    - job: ManualApproval
-      displayName: "Review Terraform Plan"
-      pool: server
-
-      timeoutInMinutes: 1440
-
-      steps:
-
-        - task: ManualValidation@1
-          displayName: "Approve Infrastructure Deployment"
-          timeoutInMinutes: 1440
-          inputs:
-            notifyUsers: ""
-            instructions: |
-              Review the Terraform plan generated by the Plan stage.
-
-              Confirm that the planned infrastructure changes are expected
-              before approving the deployment.
-
-              The exact reviewed Terraform plan artifact will be used
-              during the Apply stage.
-
-              Approve this validation to continue with Terraform Apply.
-            onTimeout: "reject"
-
-
-# ============================================================
-# Stage 4: Apply
-# ============================================================
-- stage: Apply
-  displayName: "Terraform Apply"
-
-  dependsOn: Approval
-  condition: succeeded()
-
-  jobs:
-    - job: TerraformApply
-      displayName: "Apply Reviewed Terraform Plan"
-
-      steps:
-
-        - checkout: self
+            echo "SSH host keys configured."
+          displayName: "Configure SSH Host Keys"
 
         # ----------------------------------------------------
-        # Install Terraform
+        # Test Ansible connectivity
         # ----------------------------------------------------
-        - task: TerraformInstaller@1
-          displayName: "Install Terraform"
-          inputs:
-            terraformVersion: "latest"
+        - bash: |
+            set -euo pipefail
 
-        # ----------------------------------------------------
-        # Download the EXACT reviewed plan
-        # ----------------------------------------------------
-        - task: DownloadPipelineArtifact@2
-          displayName: "Download Reviewed Terraform Plan"
-          inputs:
-            artifact: "terraform-plan"
-            path: "$(Pipeline.Workspace)/terraform-plan"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
 
-        # ----------------------------------------------------
-        # Terraform Init
-        # ----------------------------------------------------
-        - task: AzureCLI@2
-          displayName: "Terraform Init"
-          inputs:
-            azureSubscription: "$(azureServiceConnection)"
-            scriptType: bash
-            scriptLocation: inlineScript
-            inlineScript: |
-              set -euo pipefail
+            echo "Testing connectivity to all managed hosts..."
 
-              cd "$(terraformWorkingDirectory)"
-
-              terraform init \
-                -backend-config="resource_group_name=$(terraformStateResourceGroup)" \
-                -backend-config="storage_account_name=$(terraformStateStorageAccount)" \
-                -backend-config="container_name=$(terraformStateContainer)" \
-                -backend-config="key=$(terraformStateKey)" \
-                -backend-config="use_azuread_auth=true"
+            ansible all \
+              -i ansible/inventory.ini \
+              --private-key "$(sshKey.secureFilePath)" \
+              -m ansible.builtin.ping
+          displayName: "Test Ansible Connectivity"
 
         # ----------------------------------------------------
-        # Apply EXACT reviewed plan
+        # Create temporary database credentials
         # ----------------------------------------------------
-        - task: AzureCLI@2
-          displayName: "Terraform Apply"
-          inputs:
-            azureSubscription: "$(azureServiceConnection)"
-            scriptType: bash
-            scriptLocation: inlineScript
-            inlineScript: |
-              set -euo pipefail
+        - bash: |
+            set -euo pipefail
 
-              cd "$(terraformWorkingDirectory)"
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.json"
 
-              PLAN_FILE="$(Pipeline.Workspace)/terraform-plan/tfplan"
+            MYSQL_USER="$MYSQL_USER" \
+            MYSQL_PASSWORD="$MYSQL_PASSWORD" \
+            SECRET_FILE="$SECRET_FILE" \
+            python3 <<'PY'
+            import json
+            import os
 
-              echo "Applying the exact reviewed Terraform plan..."
+            data = {
+                "mysql_user": os.environ["MYSQL_USER"],
+                "mysql_password": os.environ["MYSQL_PASSWORD"]
+            }
 
-              terraform apply \
-                -auto-approve \
-                "$PLAN_FILE"
+            with open(os.environ["SECRET_FILE"], "w", encoding="utf-8") as f:
+                json.dump(data, f)
 
-              echo "Terraform apply completed successfully."
+            os.chmod(os.environ["SECRET_FILE"], 0o600)
+            PY
 
-              echo "Terraform outputs:"
-              terraform output
+            echo "Temporary Ansible credentials file created."
+          displayName: "Prepare Database Credentials"
+          env:
+            MYSQL_USER: $(mysqlAdminUsername)
+            MYSQL_PASSWORD: $(mysqlAdminPassword)
+
+        # ----------------------------------------------------
+        # Deploy EpicBook
+        # The playbook includes the verification role.
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.json"
+
+            echo "Starting EpicBook deployment..."
+
+            ansible-playbook \
+              -i ansible/inventory.ini \
+              --private-key "$(sshKey.secureFilePath)" \
+              ansible/site.yml \
+              -e "@${SECRET_FILE}"
+
+            echo "EpicBook deployment completed successfully."
+          displayName: "Deploy EpicBook"
+
+        # ----------------------------------------------------
+        # Remove temporary credentials
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.json"
+
+            if [ -f "$SECRET_FILE" ]; then
+              rm -f "$SECRET_FILE"
+            fi
+
+            echo "Temporary database credentials removed."
+          displayName: "Clean Temporary Secrets"
+          condition: always()
