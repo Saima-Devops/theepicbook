@@ -1,19 +1,249 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
 trigger:
-- main
+  branches:
+    include:
+      - main
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+variables:
+  - group: Epicbook-mysql-secrets
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+stages:
+
+# ============================================================
+# Stage 1: Validate
+# ============================================================
+- stage: Validate
+  displayName: "Validate Ansible Configuration"
+
+  jobs:
+    - job: ValidateAnsible
+      displayName: "Validate Ansible"
+
+      steps:
+
+        - checkout: self
+
+        - bash: |
+            set -euo pipefail
+
+            echo "Creating Ansible virtual environment..."
+
+            python3 -m venv "$(Agent.TempDirectory)/ansible-venv"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            python -m pip install --upgrade pip
+            python -m pip install ansible
+
+            echo "Ansible version:"
+            ansible --version
+
+            echo "Installing required Ansible collections..."
+
+            ansible-galaxy collection install \
+              -r ansible/collections/requirements.yml
+
+            echo "Installed collections:"
+            ansible-galaxy collection list
+          displayName: "Install Ansible and Collections"
+
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            echo "Validating Ansible inventory..."
+
+            ansible-inventory \
+              -i ansible/inventory.ini \
+              --graph
+
+            ansible-inventory \
+              -i ansible/inventory.ini \
+              --list > /dev/null
+
+            echo "Inventory validation successful."
+          displayName: "Validate Inventory"
+
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            echo "Running Ansible syntax check..."
+
+            ansible-playbook \
+              -i ansible/inventory.ini \
+              ansible/site.yml \
+              --syntax-check
+
+            echo "Ansible syntax validation successful."
+          displayName: "Validate Playbook"
+
+
+# ============================================================
+# Stage 2: Deploy
+# ============================================================
+- stage: Deploy
+  displayName: "Deploy EpicBook"
+
+  dependsOn: Validate
+  condition: succeeded()
+
+  jobs:
+    - job: DeployEpicBook
+      displayName: "Deploy EpicBook with Ansible"
+
+      steps:
+
+        - checkout: self
+
+        # ----------------------------------------------------
+        # Install Ansible
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            python3 -m venv "$(Agent.TempDirectory)/ansible-venv"
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            python -m pip install --upgrade pip
+            python -m pip install ansible
+
+            ansible-galaxy collection install \
+              -r ansible/collections/requirements.yml
+
+            echo "Ansible installation successful."
+            ansible --version
+          displayName: "Install Ansible"
+
+        # ----------------------------------------------------
+        # Download SSH private key from Azure DevOps Secure Files
+        # ----------------------------------------------------
+        - task: DownloadSecureFile@1
+          name: sshKey
+          displayName: "Download SSH Private Key"
+          inputs:
+            secureFile: azure-ansible
+
+        # ----------------------------------------------------
+        # Prepare SSH
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+
+            chmod 600 "$(sshKey.secureFilePath)"
+
+            touch ~/.ssh/known_hosts
+            chmod 600 ~/.ssh/known_hosts
+
+            echo "SSH key prepared securely."
+          displayName: "Prepare SSH"
+
+        # ----------------------------------------------------
+        # Register VM host keys
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            HOSTS=$(awk '
+              /ansible_host=/ {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /^ansible_host=/) {
+                    split($i, a, "=")
+                    print a[2]
+                  }
+                }
+              }
+            ' ansible/inventory.ini | sort -u)
+
+            for HOST in $HOSTS; do
+              echo "Adding host key for $HOST"
+              ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+            done
+
+            echo "SSH host keys configured."
+          displayName: "Configure SSH Host Keys"
+
+        # ----------------------------------------------------
+        # Test Ansible connectivity
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            echo "Testing connectivity to all managed hosts..."
+
+            ansible all \
+              -i ansible/inventory.ini \
+              --private-key "$(sshKey.secureFilePath)" \
+              -m ansible.builtin.ping
+          displayName: "Test Ansible Connectivity"
+
+        # ----------------------------------------------------
+        # Create temporary database credentials
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.yml"
+
+            umask 077
+
+            printf 'mysql_user: "%s"\nmysql_password: "%s"\n' \
+              "$MYSQL_USER" \
+              "$MYSQL_PASSWORD" \
+              > "$SECRET_FILE"
+
+            chmod 600 "$SECRET_FILE"
+
+            echo "Temporary Ansible credentials file created."
+          displayName: "Prepare Database Credentials"
+          env:
+            MYSQL_USER: $(mysqlAdminUsername)
+            MYSQL_PASSWORD: $(mysqlAdminPassword)
+
+        # ----------------------------------------------------
+        # Deploy EpicBook
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            source "$(Agent.TempDirectory)/ansible-venv/bin/activate"
+
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.yml"
+
+            echo "Starting EpicBook deployment..."
+
+            ansible-playbook \
+              -i ansible/inventory.ini \
+              --private-key "$(sshKey.secureFilePath)" \
+              ansible/site.yml \
+              -e "@${SECRET_FILE}"
+
+            echo "EpicBook deployment completed successfully."
+          displayName: "Deploy EpicBook"
+          env:
+            MYSQL_USER: $(mysqlAdminUsername)
+            MYSQL_PASSWORD: $(mysqlAdminPassword)
+
+        # ----------------------------------------------------
+        # Remove temporary credentials
+        # ----------------------------------------------------
+        - bash: |
+            set -euo pipefail
+
+            SECRET_FILE="$(Agent.TempDirectory)/epicbook-secrets.yml"
+
+            if [ -f "$SECRET_FILE" ]; then
+              rm -f "$SECRET_FILE"
+            fi
+
+            echo "Temporary database credentials removed."
+          displayName: "Clean Temporary Secrets"
+          condition: always()
