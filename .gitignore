@@ -4,7 +4,10 @@ node_modules
 # Ansible / SSH
 *.pem
 *.key
-ansible/inventory.ini
 ansible/group_vars/*/vault.yml
 *.retry
 
+terraform/terraform.tfvars
+# Ansible inventory contains non-sensitive host addressing only
+# Keep secrets and private keys out of Git.
+!ansible/inventory.ini

@@ -1,0 +1,180 @@
+---
+- name: Install MySQL client
+  ansible.builtin.apt:
+    name: mysql-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Verify connectivity to Azure Database for MySQL
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - "--ssl-mode=REQUIRED"
+      - "-h"
+      - "{{ mysql_host }}"
+      - "-P"
+      - "{{ mysql_port | string }}"
+      - "-u"
+      - "{{ mysql_user }}"
+      - "-e"
+      - "SELECT 1;"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  register: mysql_connectivity
+  changed_when: false
+  no_log: true
+
+- name: Verify bookstore database exists
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - "--ssl-mode=REQUIRED"
+      - "-h"
+      - "{{ mysql_host }}"
+      - "-P"
+      - "{{ mysql_port | string }}"
+      - "-u"
+      - "{{ mysql_user }}"
+      - "-e"
+      - "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='{{ mysql_database }}';"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  register: bookstore_database
+  changed_when: false
+  no_log: true
+
+- name: Fail when bookstore database is unavailable
+  ansible.builtin.assert:
+    that:
+      - "'bookstore' in bookstore_database.stdout"
+    fail_msg: "The bookstore database was not found on the managed MySQL server."
+
+- name: Copy EpicBook database schema
+  ansible.builtin.copy:
+    src: "{{ app_dir }}/db/BuyTheBook_Schema.sql"
+    dest: /tmp/BuyTheBook_Schema.sql
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Check whether EpicBook schema is already initialized
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - "--ssl-mode=REQUIRED"
+      - "-h"
+      - "{{ mysql_host }}"
+      - "-P"
+      - "{{ mysql_port | string }}"
+      - "-u"
+      - "{{ mysql_user }}"
+      - "-D"
+      - "{{ mysql_database }}"
+      - "-N"
+      - "-B"
+      - "-e"
+      - "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ mysql_database }}' AND table_name IN ('Author','Book','Cart');"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  register: schema_table_count
+  changed_when: false
+  no_log: true
+
+- name: Initialize EpicBook database schema
+  ansible.builtin.shell:
+    cmd: "mysql --ssl-mode=REQUIRED -h '{{ mysql_host }}' -P '{{ mysql_port }}' -u '{{ mysql_user }}' '{{ mysql_database }}' < /tmp/BuyTheBook_Schema.sql"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  when: schema_table_count.stdout | int == 0
+  no_log: true
+
+- name: Copy EpicBook author seed data
+  ansible.builtin.copy:
+    src: "{{ app_dir }}/db/author_seed.sql"
+    dest: /tmp/author_seed.sql
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Check whether authors are already seeded
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - "--ssl-mode=REQUIRED"
+      - "-h"
+      - "{{ mysql_host }}"
+      - "-P"
+      - "{{ mysql_port | string }}"
+      - "-u"
+      - "{{ mysql_user }}"
+      - "-D"
+      - "{{ mysql_database }}"
+      - "-N"
+      - "-B"
+      - "-e"
+      - "SELECT COUNT(*) FROM Author;"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  register: author_count
+  changed_when: false
+  no_log: true
+
+- name: Seed authors
+  ansible.builtin.shell:
+    cmd: "mysql --ssl-mode=REQUIRED -h '{{ mysql_host }}' -P '{{ mysql_port }}' -u '{{ mysql_user }}' '{{ mysql_database }}' < /tmp/author_seed.sql"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  when: author_count.stdout | int == 0
+  no_log: true
+
+- name: Copy EpicBook book seed data
+  ansible.builtin.copy:
+    src: "{{ app_dir }}/db/books_seed.sql"
+    dest: /tmp/books_seed.sql
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Check whether books are already seeded
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - "--ssl-mode=REQUIRED"
+      - "-h"
+      - "{{ mysql_host }}"
+      - "-P"
+      - "{{ mysql_port | string }}"
+      - "-u"
+      - "{{ mysql_user }}"
+      - "-D"
+      - "{{ mysql_database }}"
+      - "-N"
+      - "-B"
+      - "-e"
+      - "SELECT COUNT(*) FROM Book;"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  register: book_count
+  changed_when: false
+  no_log: true
+
+- name: Seed books
+  ansible.builtin.shell:
+    cmd: "mysql --ssl-mode=REQUIRED -h '{{ mysql_host }}' -P '{{ mysql_port }}' -u '{{ mysql_user }}' '{{ mysql_database }}' < /tmp/books_seed.sql"
+  environment:
+    MYSQL_PWD: "{{ mysql_password }}"
+  when: book_count.stdout | int == 0
+  no_log: true
+
+- name: Remove temporary database files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/BuyTheBook_Schema.sql
+    - /tmp/author_seed.sql
+    - /tmp/books_seed.sql

@@ -1,0 +1,12 @@
+---
+# Node.js
+node_major_version: "20"
+
+# Backend
+backend_app_port: 8080
+
+# Azure Database for MySQL
+mysql_host: "epicbookmysql6992.mysql.database.azure.com"
+mysql_port: 3306
+mysql_database: "bookstore"
+mysql_user: "saimadmin12"

@@ -1,0 +1,22 @@
+---
+- name: Configure EpicBook backend
+  hosts: backend
+  become: true
+  roles:
+    - common
+    - backend
+    - database
+
+  tasks:
+    - name: Start EpicBook after database initialization
+      ansible.builtin.systemd:
+        name: epicbook
+        state: started
+
+
+- name: Configure EpicBook frontend
+  hosts: frontend
+  become: true
+  roles:
+    - common
+    - frontend

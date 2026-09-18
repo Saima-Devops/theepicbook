@@ -1,0 +1,7 @@
+---
+# Shared EpicBook application settings
+app_dir: /opt/epicbook
+app_user: saima
+app_environment: production
+app_branch: main
+app_repository: "https://github.com/Saima-Devops/theepicbook.git"
